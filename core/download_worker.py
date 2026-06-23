@@ -13,15 +13,25 @@ ARCHIVE_SKIP_SIGNALS = (
 )
 
 
-class LogAdapter:
-    """Bridges yt-dlp's logger into our DB/SSE log, and watches the stream for
-    archive-skip notices so the worker can count re-checked videos."""
+class BlockingError(Exception):
+    """Raised to abort a run when a blocking error (YouTube bot-check /
+    rate-limit / network failure) is seen, so we stop churning through the
+    rest of the playlist on a flagged IP and retry on a fresh proxy instead."""
 
-    def __init__(self, db, download_id, log_callback=None, on_archive_skip=None):
+
+class LogAdapter:
+    """Bridges yt-dlp's logger into our DB/SSE log, watches for archive-skip
+    notices (to count re-checked videos), and forwards yt-dlp ERROR lines to
+    the worker so blocking errors swallowed by ``ignoreerrors`` can still be
+    detected and acted on."""
+
+    def __init__(self, db, download_id, log_callback=None,
+                 on_archive_skip=None, on_error=None):
         self.db = db
         self.download_id = download_id
         self.log_callback = log_callback
         self.on_archive_skip = on_archive_skip
+        self.on_error = on_error
 
     def debug(self, msg):
         if any(sig in msg for sig in ARCHIVE_SKIP_SIGNALS):
@@ -35,6 +45,9 @@ class LogAdapter:
 
     def error(self, msg):
         self._log('error', msg)
+        if self.on_error:
+            # May raise BlockingError to abort the run early.
+            self.on_error(msg)
 
     def _log(self, level, msg):
         self.db.add_log(self.download_id, level, msg)
@@ -62,6 +75,10 @@ class DownloadWorker(threading.Thread):
         # (separate video+audio) don't double-count a single video.
         self._counted_done = set()
         self._counted_failed = set()
+        # Set when a blocking error (bot-check / rate-limit / network) is seen
+        # so we abort and retry on a fresh proxy instead of skipping the video.
+        self._blocking_error = None
+        self._abort_raised = False
 
     def stop(self):
         self._stop_event.set()
@@ -145,13 +162,16 @@ class DownloadWorker(threading.Thread):
         entry = self.db.get_download(self.download_id)
         proxy = self._current_proxy()
         self._active_proxy = proxy
+        self._blocking_error = None
+        self._abort_raised = False
         if proxy:
             self._log('info', f'Routing download through proxy: {proxy}')
 
         opts = get_ydl_opts(entry, self.config, proxy=proxy)
         opts['progress_hooks'] = [self._on_progress]
         opts['logger'] = LogAdapter(self.db, self.download_id, self.log_callback,
-                                    on_archive_skip=self._on_archive_skip)
+                                    on_archive_skip=self._on_archive_skip,
+                                    on_error=self._on_engine_error)
 
         try:
             self.engine_manager.register_worker()
@@ -161,6 +181,14 @@ class DownloadWorker(threading.Thread):
             finally:
                 self.engine_manager.unregister_worker()
 
+            # ignoreerrors lets a playlist "finish" even though a video hit a
+            # blocking error (e.g. YouTube's bot-check) that was logged and
+            # skipped. Do NOT mark the item completed in that case -- switch
+            # proxy and retry so the skipped video is actually re-attempted.
+            if self._blocking_error:
+                self._handle_failure(entry, self._blocking_error)
+                return
+
             if proxy and self.proxy_manager:
                 self.proxy_manager.report_success(proxy)
 
@@ -168,20 +196,67 @@ class DownloadWorker(threading.Thread):
                                current_speed=None, current_eta=None)
             self._log('info', 'Download completed successfully')
 
+        except BlockingError as e:
+            # Early-aborted on the first blocking error -- retry on a new proxy.
+            self._handle_failure(entry, self._blocking_error or str(e))
         except Exception as e:
             error_msg = str(e)
-            # A pause/hotswap is a controlled interruption, not a failure.
+            # A pause/hotswap or user-cancel is a controlled interruption.
             if 'hotswap' in error_msg or self._stop_event.is_set():
                 return
+            self._handle_failure(entry, self._blocking_error or error_msg)
 
-            if proxy and self.proxy_manager:
-                self.proxy_manager.report_failure(proxy)
+    def _handle_failure(self, entry, msg):
+        """Route a failed run: switch proxy on blocking errors, then ask the
+        error handler whether to retry (and how soon) or give up."""
+        etype = self.error_handler.detect_error_type(msg)
+        proxy_switched = False
+        if self.proxy_manager is not None and etype in ('rate_limit', 'network_error'):
+            # A YouTube bot-check means the IP is flagged: mark it bad outright.
+            hard = self._is_bot_check(msg)
+            new_proxy = self.proxy_manager.trigger(
+                self._short_reason(msg), failed_proxy=self._active_proxy, hard=hard)
+            proxy_switched = new_proxy is not None
 
-            result = self.error_handler.handle_error(self.download_id, error_msg, entry)
-            # 'failed' is terminal: clean up partial files. 'retry'/'rate_limited'
-            # leave .part files in place so yt-dlp can resume the next attempt.
-            if result == 'failed':
-                self._cleanup_part_files()
+        # If videos were downloaded this run AND the archive is on (so a retry
+        # resumes instead of re-downloading), the connection is making progress
+        # -- keep retrying with fresh proxies rather than burning the retry
+        # budget on a long playlist.
+        archive_on = str(self.config.get('archive_enabled', 'true')) == 'true'
+        progressed = archive_on and len(self._counted_done) > 0
+        result = self.error_handler.handle_error(
+            self.download_id, msg, entry,
+            proxy_switched=proxy_switched, progressed=progressed)
+        if result == 'failed':
+            self._cleanup_part_files()
+        return result
+
+    @staticmethod
+    def _is_bot_check(msg):
+        low = str(msg).lower()
+        return 'not a bot' in low or 'sign in to confirm' in low
+
+    @staticmethod
+    def _short_reason(msg):
+        low = str(msg).lower()
+        if 'not a bot' in low or 'sign in to confirm' in low:
+            return 'youtube bot-check'
+        if 'http error 429' in low or 'too many requests' in low:
+            return 'rate limit (429)'
+        return 'network/blocking error'
+
+    def _on_engine_error(self, msg):
+        """Called for every yt-dlp ERROR line (even ones ignoreerrors swallows).
+
+        Records the first blocking error and aborts the run early so we don't
+        keep hammering a flagged IP for the rest of the playlist."""
+        etype = self.error_handler.detect_error_type(msg)
+        if etype in ('rate_limit', 'network_error'):
+            if self._blocking_error is None:
+                self._blocking_error = msg
+            if not self._abort_raised:
+                self._abort_raised = True
+                raise BlockingError(msg)
 
     def _on_archive_skip(self, msg):
         self.db.increment_download(self.download_id, archived_videos=1)
@@ -191,6 +266,11 @@ class DownloadWorker(threading.Thread):
             raise Exception("Download cancelled by user")
 
         self._pause_event.wait()
+
+        # If a blocking error was seen but couldn't abort from the logger (e.g.
+        # the engine swallowed it), abort now that a hook is firing.
+        if self._abort_raised:
+            raise BlockingError(self._blocking_error or 'blocking error')
 
         if self.engine_manager.update_in_progress:
             self._log('info', 'Engine update in progress. Pausing for hotswap.')

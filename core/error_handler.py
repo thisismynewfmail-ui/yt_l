@@ -4,6 +4,9 @@ from datetime import datetime, timedelta
 RATE_LIMIT_SIGNALS = [
     "http error 429",
     "sign in to confirm",
+    "not a bot",
+    "confirm you're not a bot",
+    "confirm you are not a bot",
     "too many requests",
     "rate limit",
     "please slow down",
@@ -21,9 +24,15 @@ NETWORK_SIGNALS = [
     "unable to connect",
     "tunnel connection failed",
     "remote end closed connection",
+    "unable to download webpage",
 ]
 
+# Escalating cool-down used when we have NO fresh proxy to switch to and must
+# simply wait out the rate limit.
 BACKOFF_SCHEDULE = [300, 900, 1800]
+# Short delay used when we just switched to a fresh proxy -- retry quickly
+# rather than waiting out a limit that the new IP isn't subject to.
+PROXY_SWITCH_DELAY = 20
 
 
 class ErrorHandler:
@@ -43,54 +52,59 @@ class ErrorHandler:
                 return 'network_error'
         return 'download_error'
 
-    def _maybe_trigger_proxy(self, reason):
-        if self.proxy_manager is not None:
-            try:
-                self.proxy_manager.trigger(reason)
-            except Exception:
-                pass
+    def handle_error(self, download_id, error_msg, entry, proxy_switched=False, progressed=False):
+        """Decide how to react to a failed run.
 
-    def handle_error(self, download_id, error_msg, entry):
+        ``proxy_switched`` -> we already rotated to a fresh proxy, so retry soon.
+        ``progressed``     -> videos were downloaded this run, so don't spend the
+                              retry budget; reset it and keep going.
+        """
         error_type = self.detect_error_type(error_msg)
+        if error_type in ('rate_limit', 'network_error'):
+            return self._handle_blocking(download_id, error_msg, entry,
+                                         error_type, proxy_switched, progressed)
+        return self._handle_download_error(download_id, error_msg, entry, progressed)
 
-        if error_type == 'rate_limit':
-            self._maybe_trigger_proxy('rate limit')
-            return self._handle_rate_limit(download_id, error_msg, entry)
-        if error_type == 'network_error':
-            self._maybe_trigger_proxy('network error')
-        return self._handle_download_error(download_id, error_msg, entry)
-
-    def _handle_rate_limit(self, download_id, error_msg, entry):
-        retry_count = entry.get('retry_count', 0)
+    def _handle_blocking(self, download_id, error_msg, entry, error_type,
+                         proxy_switched, progressed):
+        retry_count = 0 if progressed else entry.get('retry_count', 0)
         max_retries = entry.get('max_retries', 3)
 
         if retry_count >= max_retries:
-            self.db.set_status(download_id, 'failed', error_message=f"Max retries exceeded: {error_msg}")
-            self._log(download_id, 'error', f'Rate limit exceeded max retries ({max_retries}). Marking as failed.')
+            self.db.set_status(download_id, 'failed',
+                               error_message=f"Max retries exceeded: {error_msg}")
+            self._log(download_id, 'error',
+                      f'Blocking error exceeded max retries ({max_retries}). Marking as failed.')
             return 'failed'
 
-        backoff = BACKOFF_SCHEDULE[min(retry_count, len(BACKOFF_SCHEDULE) - 1)]
+        if proxy_switched:
+            delay = PROXY_SWITCH_DELAY
+            how = 'switched to a fresh proxy'
+        else:
+            delay = BACKOFF_SCHEDULE[min(retry_count, len(BACKOFF_SCHEDULE) - 1)]
+            how = 'waiting out the limit (no proxy available)'
 
         self.db.update_download(
             download_id,
             status='rate_limited',
             error_message=error_msg,
-            retry_count=retry_count + 1
+            retry_count=retry_count + 1,
         )
 
+        progressed_note = ' (made progress, budget reset)' if progressed else ''
         self._log(download_id, 'warning',
-                  f'Rate limited. Retrying in {backoff // 60}min (attempt {retry_count + 1}/{max_retries})')
+                  f'{error_type.replace("_", " ").title()} -- {how}; retrying in '
+                  f'{delay}s (attempt {retry_count + 1}/{max_retries}){progressed_note}')
 
         self.cancel_retry(download_id)
-        timer = threading.Timer(backoff, self._retry_callback, args=[download_id])
+        timer = threading.Timer(delay, self._retry_callback, args=[download_id])
         timer.daemon = True
         timer.start()
         self._retry_timers[download_id] = timer
-
         return 'rate_limited'
 
-    def _handle_download_error(self, download_id, error_msg, entry):
-        retry_count = entry.get('retry_count', 0)
+    def _handle_download_error(self, download_id, error_msg, entry, progressed=False):
+        retry_count = 0 if progressed else entry.get('retry_count', 0)
         max_retries = entry.get('max_retries', 3)
 
         if retry_count >= max_retries:
@@ -117,7 +131,7 @@ class ErrorHandler:
             entry = self.db.get_download(download_id)
             if entry and entry['status'] == 'rate_limited':
                 self.db.set_status(download_id, 'queued', error_message=None)
-                self._log(download_id, 'info', 'Rate limit cooldown finished. Re-queued for download.')
+                self._log(download_id, 'info', 'Cooldown finished. Re-queued for download.')
         except Exception:
             pass
         finally:

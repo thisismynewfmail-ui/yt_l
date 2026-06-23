@@ -13,9 +13,18 @@ Goals (see project requirements):
     frequently-updated public proxy lists (plus a static seed fallback) and
     validated with a fast reachability check.
 
-The module is intentionally dependency-free: candidate validation uses a plain
-TCP connect test (scheme-agnostic) and remote lists are fetched with urllib, so
-it works the same whether or not optional libraries are installed.
+The module is intentionally dependency-free: remote lists are fetched with
+urllib and candidates are validated by actually reaching Google through them
+(HTTP/HTTPS proxies) or, for SOCKS proxies, with a TCP reachability check.
+
+Reality check: free public proxies are mostly datacenter IPs that Google /
+YouTube block on sight (the "Sign in to confirm you're not a bot" wall). So we
+do three things to maximise the odds of a *working* proxy:
+  1. Validate candidates against Google and prefer ones that pass.
+  2. Treat any proxy that triggers a YouTube bot-check as bad and never reuse
+     it (the strongest, real-world signal of a flagged IP).
+  3. Honour a user-supplied proxy list first -- residential/paid proxies the
+     user pastes in are far more likely to work than scraped public ones.
 """
 
 import random
@@ -23,28 +32,28 @@ import socket
 import threading
 import time
 from urllib.parse import urlparse
-from urllib.request import urlopen
+from urllib.request import build_opener, ProxyHandler, Request, urlopen
 
 
-# Reputable, frequently-updated public proxy lists. Each file is one
-# ``host:port`` per line. Pulling from several keeps the pool wide and fresh.
+# Candidate proxy lists, ordered best-first. Elite + SSL-capable proxies are
+# the most likely to survive Google/YouTube, so those sources come first; the
+# broad GitHub lists are kept as a wide fallback pool.
 DEFAULT_PROXY_SOURCES = [
-    ('socks5', 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt'),
-    ('socks4', 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt'),
-    ('http', 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt'),
+    ('https', 'https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=7000&ssl=yes&anonymity=elite'),
+    ('socks5', 'https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=7000'),
     ('socks5', 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt'),
-    ('http', 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt'),
-    ('http', 'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt'),
+    ('https', 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt'),
+    ('socks5', 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt'),
+    ('https', 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt'),
 ]
 
 # Last-resort static seed used only when no user list is configured and the
 # remote sources cannot be reached. Public proxies are volatile by nature, so
-# every candidate is health-checked before use and rotated away from on failure.
+# every candidate is validated before use and rotated away from on failure.
 DEFAULT_SEED_PROXIES = [
     'socks5://98.178.72.21:10919',
     'socks5://184.178.172.25:15291',
     'socks5://72.206.181.105:64935',
-    'socks4://51.222.13.193:10001',
     'http://51.158.169.52:29976',
     'http://8.219.97.248:80',
 ]
@@ -55,8 +64,11 @@ MODES = ('off', 'auto', 'always')
 FAIL_THRESHOLD = 2
 # Cap the working pool so refreshes/health-checks stay fast.
 MAX_POOL = 250
-# Per-candidate TCP connect timeout (seconds) for the reachability check.
-PROBE_TIMEOUT = 5
+# Per-candidate connect timeout (seconds) for the reachability/validation check.
+PROBE_TIMEOUT = 7
+# Tiny Google endpoint that returns HTTP 204. Reaching it through a proxy is a
+# necessary condition for that proxy to work with YouTube.
+PROXY_TEST_URL = 'https://www.google.com/generate_204'
 
 
 def normalize_proxy(raw, default_scheme='http'):
@@ -92,6 +104,7 @@ class ProxyManager:
         self._deactivate_at = 0.0
         self._user_list_raw = None
         self._refreshed = False
+        self._validating = False  # guards against spawning many probe threads
 
         if config is not None:
             self.configure(config)
@@ -224,9 +237,27 @@ class ProxyManager:
 
     @staticmethod
     def _probe(url):
+        """Return True if the proxy looks usable for Google/YouTube.
+
+        HTTP/HTTPS proxies are validated by actually fetching a tiny Google
+        endpoint through them (the real test that matters). SOCKS proxies can't
+        be driven by urllib without extra deps, so they fall back to a TCP
+        reachability check.
+        """
         parsed = urlparse(url)
         if not parsed.hostname or not parsed.port:
             return False
+        scheme = parsed.scheme
+        if scheme in ('http', 'https'):
+            try:
+                handler = ProxyHandler({'http': url, 'https': url})
+                opener = build_opener(handler)
+                req = Request(PROXY_TEST_URL, headers={'User-Agent': 'Mozilla/5.0'})
+                with opener.open(req, timeout=PROBE_TIMEOUT) as resp:
+                    return resp.status in (200, 204)
+            except Exception:
+                return False
+        # SOCKS (or unknown): best-effort liveness check on the proxy port.
         try:
             with socket.create_connection((parsed.hostname, parsed.port), timeout=PROBE_TIMEOUT):
                 return True
@@ -237,19 +268,21 @@ class ProxyManager:
     def _rotate_locked(self):
         """Advance ``current`` to the next usable proxy (round-robin).
 
-        Scans the pool in circular order starting just after the current
-        index, skipping proxies marked bad. Caller holds the lock.
+        Prefers proxies validated against Google ('good'), then untested
+        ('unknown'), skipping ones marked bad. Caller holds the lock.
         """
         n = len(self._pool)
         if n == 0:
             self.current = None
             return None
-        for step in range(1, n + 1):
-            idx = (self._index + step) % n
-            if self._pool[idx]['status'] != 'bad':
-                self._index = idx
-                self.current = self._pool[idx]['url']
-                return self.current
+        # First pass: only validated-good proxies. Second pass: good or unknown.
+        for allowed in (('good',), ('good', 'unknown')):
+            for step in range(1, n + 1):
+                idx = (self._index + step) % n
+                if self._pool[idx]['status'] in allowed:
+                    self._index = idx
+                    self.current = self._pool[idx]['url']
+                    return self.current
         # Everything is marked bad -- give them all another chance rather than
         # wedge the queue with no usable proxy.
         for entry in self._pool:
@@ -260,26 +293,54 @@ class ProxyManager:
         return self.current
 
     # ---- public lifecycle ----------------------------------------------
-    def trigger(self, reason='error'):
-        """Auto-engage the proxy system (called on rate-limit/network errors)."""
+    def trigger(self, reason='error', failed_proxy=None, hard=False):
+        """Auto-engage the proxy system and switch to a fresh proxy.
+
+        Called when a download hits a rate-limit / bot-check / network error.
+        ``failed_proxy`` (the proxy that was in use) is penalised so we rotate
+        *off* it; ``hard=True`` marks it bad immediately (used for YouTube
+        bot-checks, where the IP is clearly flagged and not worth retrying).
+        """
         if self.mode not in ('auto', 'always'):
             return None
         self.ensure_pool()
         with self._lock:
+            if failed_proxy:
+                self._penalise_locked(failed_proxy, hard=hard)
             was_active = self.active
             self.active = True
             self._deactivate_at = time.time() + self.active_seconds
             proxy = self._rotate_locked()
+            need_validation = (proxy is not None and not self._validating
+                               and not any(p['status'] == 'good' for p in self._pool))
+            if need_validation:
+                self._validating = True
         if proxy:
-            if was_active:
-                self._log('warning', f'Proxy rotation ({reason}): switched to {proxy}. '
-                                     f'Auto-off in {self.active_seconds}s.')
-            else:
-                self._log('warning', f'Proxy system engaged ({reason}): {proxy}. '
-                                     f'Auto-off in {self.active_seconds}s.')
+            verb = 'rotation' if was_active else 'system engaged'
+            self._log('warning', f'Proxy {verb} ({reason}): now using {proxy}. '
+                                 f'Auto-off in {self.active_seconds}s.')
+            # No proxy has been validated against Google yet -- kick a single
+            # background check so future rotations prefer ones that actually work.
+            if need_validation:
+                threading.Thread(target=self._validate_async, daemon=True).start()
         else:
             self._log('error', 'Proxy trigger requested but no candidates are available.')
         return proxy
+
+    def _validate_async(self):
+        try:
+            self.health_check(sample=30)
+        finally:
+            self._validating = False
+
+    def _penalise_locked(self, proxy_url, hard=False):
+        for entry in self._pool:
+            if entry['url'] == proxy_url:
+                entry['fails'] += 1
+                if hard or entry['fails'] >= FAIL_THRESHOLD:
+                    entry['status'] = 'bad'
+                return
+        # Not in the pool (e.g. user removed it) -- nothing to penalise.
 
     def get_proxy(self):
         """Return the proxy URL to use right now, or None for a direct connection."""
@@ -304,17 +365,12 @@ class ProxyManager:
                 return self.current
             return None
 
-    def report_failure(self, proxy_url):
+    def report_failure(self, proxy_url, hard=False):
         """Record that a proxy failed mid-use and rotate to the next one."""
         if not proxy_url:
             return None
         with self._lock:
-            for entry in self._pool:
-                if entry['url'] == proxy_url:
-                    entry['fails'] += 1
-                    if entry['fails'] >= FAIL_THRESHOLD:
-                        entry['status'] = 'bad'
-                    break
+            self._penalise_locked(proxy_url, hard=hard)
             if self.mode == 'off' or not self.active:
                 return None
             new_proxy = self._rotate_locked()
