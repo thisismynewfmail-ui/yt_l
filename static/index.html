@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YT-DLP Downloader</title>
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <h1>YT-DLP Downloader</h1>
+            <span id="engine-version" class="badge">v...</span>
+        </div>
+        <div class="header-right">
+            <button id="btn-update-engine" class="btn btn-small btn-warning" title="Update yt-dlp engine">Update Engine</button>
+            <button id="btn-settings" class="btn btn-small btn-secondary" title="Settings">Settings</button>
+        </div>
+    </header>
+
+    <main>
+        <section class="add-url-section">
+            <div class="add-url-row">
+                <input type="text" id="input-url" placeholder="Paste playlist, channel, or video URL..." autocomplete="off">
+                <input type="text" id="input-dir" placeholder="Custom download dir (optional)" autocomplete="off">
+                <button id="btn-add" class="btn btn-primary">Add to Queue</button>
+            </div>
+        </section>
+
+        <section class="stats-bar" id="stats-bar">
+            <div class="stat"><span class="stat-label">Active:</span> <span id="stat-active">0</span></div>
+            <div class="stat"><span class="stat-label">Queued:</span> <span id="stat-queued">0</span></div>
+            <div class="stat"><span class="stat-label">Done:</span> <span id="stat-completed">0</span></div>
+            <div class="stat"><span class="stat-label">Failed:</span> <span id="stat-failed">0</span></div>
+            <div class="stat"><span class="stat-label">Total:</span> <span id="stat-total">0</span></div>
+            <div class="stat-divider"></div>
+            <button id="btn-pause-all" class="btn btn-small btn-warning">Pause All</button>
+            <button id="btn-resume-all" class="btn btn-small btn-success">Resume Next</button>
+        </section>
+
+        <section class="queue-section">
+            <h2>Download Queue</h2>
+            <div id="download-queue" class="download-queue">
+                <div class="empty-state" id="empty-queue">No downloads in queue. Add a URL above to get started.</div>
+            </div>
+        </section>
+
+        <section class="log-section">
+            <div class="log-header">
+                <h2>Output Log</h2>
+                <button id="btn-clear-log" class="btn btn-small btn-secondary">Clear</button>
+                <label><input type="checkbox" id="auto-scroll" checked> Auto-scroll</label>
+            </div>
+            <div id="log-output" class="log-output"></div>
+        </section>
+    </main>
+
+    <div id="settings-modal" class="modal hidden">
+        <div class="modal-backdrop"></div>
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Default Configuration</h2>
+                <button class="modal-close" id="btn-close-settings">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="cfg-output-dir">Default Download Directory</label>
+                    <input type="text" id="cfg-output-dir" placeholder="/path/to/downloads">
+                </div>
+                <div class="form-group">
+                    <label for="cfg-sleep-interval">Sleep Interval (seconds)</label>
+                    <input type="number" id="cfg-sleep-interval" min="0" max="3600" value="540">
+                </div>
+                <div class="form-group">
+                    <label for="cfg-max-sleep-interval">Max Sleep Interval (seconds)</label>
+                    <input type="number" id="cfg-max-sleep-interval" min="0" max="7200" value="720">
+                </div>
+                <div class="form-group">
+                    <label for="cfg-format">Format Selection</label>
+                    <textarea id="cfg-format" rows="3" placeholder="format string">bestvideo[height<=720][ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio</textarea>
+                </div>
+                <div class="form-group form-row">
+                    <label for="cfg-max-concurrent">Max Concurrent Downloads</label>
+                    <input type="number" id="cfg-max-concurrent" min="1" max="10" value="1">
+                </div>
+                <div class="form-group form-row">
+                    <label for="cfg-restart-delay">Re-check Interval (seconds)</label>
+                    <input type="number" id="cfg-restart-delay" min="60" max="7200" value="300">
+                </div>
+                <div class="form-group">
+                    <label><input type="checkbox" id="cfg-archive-enabled" checked> Enable download archive (skip already downloaded)</label>
+                </div>
+                <hr>
+                <h3>Scheduled Restart</h3>
+                <div class="form-group">
+                    <label><input type="checkbox" id="cfg-scheduled-enabled"> Enable scheduled restart</label>
+                </div>
+                <div class="form-group form-row">
+                    <label for="cfg-restart-hour">Hour (UTC)</label>
+                    <input type="number" id="cfg-restart-hour" min="0" max="23" value="3">
+                    <label for="cfg-restart-minute">Minute</label>
+                    <input type="number" id="cfg-restart-minute" min="0" max="59" value="0">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="btn-cancel-settings" class="btn btn-secondary">Cancel</button>
+                <button id="btn-apply-settings" class="btn btn-primary">Apply</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/js/api.js"></script>
+    <script src="/js/log_stream.js"></script>
+    <script src="/js/components.js"></script>
+    <script src="/js/app.js"></script>
+</body>
+</html>
