@@ -1,4 +1,3 @@
-import time
 import threading
 from datetime import datetime, timedelta
 
@@ -11,13 +10,27 @@ RATE_LIMIT_SIGNALS = [
     "you are downloading too fast",
 ]
 
+# Network-level failures that a proxy switch can plausibly get past.
+NETWORK_SIGNALS = [
+    "http error 403",
+    "connection reset",
+    "connection refused",
+    "connection timed out",
+    "timed out",
+    "temporary failure in name resolution",
+    "unable to connect",
+    "tunnel connection failed",
+    "remote end closed connection",
+]
+
 BACKOFF_SCHEDULE = [300, 900, 1800]
 
 
 class ErrorHandler:
-    def __init__(self, db_module, log_callback=None):
+    def __init__(self, db_module, log_callback=None, proxy_manager=None):
         self.db = db_module
         self.log_callback = log_callback
+        self.proxy_manager = proxy_manager
         self._retry_timers = {}
 
     def detect_error_type(self, error_msg):
@@ -25,15 +38,27 @@ class ErrorHandler:
         for signal in RATE_LIMIT_SIGNALS:
             if signal in error_lower:
                 return 'rate_limit'
+        for signal in NETWORK_SIGNALS:
+            if signal in error_lower:
+                return 'network_error'
         return 'download_error'
+
+    def _maybe_trigger_proxy(self, reason):
+        if self.proxy_manager is not None:
+            try:
+                self.proxy_manager.trigger(reason)
+            except Exception:
+                pass
 
     def handle_error(self, download_id, error_msg, entry):
         error_type = self.detect_error_type(error_msg)
 
         if error_type == 'rate_limit':
+            self._maybe_trigger_proxy('rate limit')
             return self._handle_rate_limit(download_id, error_msg, entry)
-        else:
-            return self._handle_download_error(download_id, error_msg, entry)
+        if error_type == 'network_error':
+            self._maybe_trigger_proxy('network error')
+        return self._handle_download_error(download_id, error_msg, entry)
 
     def _handle_rate_limit(self, download_id, error_msg, entry):
         retry_count = entry.get('retry_count', 0)
@@ -45,7 +70,6 @@ class ErrorHandler:
             return 'failed'
 
         backoff = BACKOFF_SCHEDULE[min(retry_count, len(BACKOFF_SCHEDULE) - 1)]
-        retry_time = datetime.utcnow() + timedelta(seconds=backoff)
 
         self.db.update_download(
             download_id,
@@ -57,6 +81,7 @@ class ErrorHandler:
         self._log(download_id, 'warning',
                   f'Rate limited. Retrying in {backoff // 60}min (attempt {retry_count + 1}/{max_retries})')
 
+        self.cancel_retry(download_id)
         timer = threading.Timer(backoff, self._retry_callback, args=[download_id])
         timer.daemon = True
         timer.start()
@@ -73,14 +98,18 @@ class ErrorHandler:
             self._log(download_id, 'error', f'Download failed after {max_retries} retries: {error_msg}')
             return 'failed'
 
+        # CRITICAL: put the item back to 'queued' so the dispatcher actually
+        # re-runs it. Previously the status was left at 'downloading' with no
+        # live worker, so the item became a zombie that never retried.
         self.db.update_download(
             download_id,
+            status='queued',
             retry_count=retry_count + 1,
             error_message=error_msg
         )
 
         self._log(download_id, 'warning',
-                  f'Download error (attempt {retry_count + 1}/{max_retries}): {error_msg}')
+                  f'Download error (attempt {retry_count + 1}/{max_retries}); re-queued: {error_msg}')
         return 'retry'
 
     def _retry_callback(self, download_id):

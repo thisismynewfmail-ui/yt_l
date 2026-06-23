@@ -15,6 +15,14 @@ DEFAULTS = {
     'scheduled_restart_enabled': 'false',
     'scheduled_restart_hour': '3',
     'scheduled_restart_minute': '0',
+    # Proxy system. mode: off | auto | always.
+    # In 'auto' mode the proxy engages itself on rate-limits/errors and turns
+    # back off after proxy_active_seconds of not being needed.
+    'proxy_mode': 'off',
+    'proxy_active_seconds': '600',
+    # Optional explicit proxy list (newline/comma separated, scheme://host:port).
+    # Leave blank to auto-source a wide pool of public proxies.
+    'proxy_list': '',
 }
 
 
@@ -30,7 +38,7 @@ def save_config(values):
         db.set_config(key, str(value))
 
 
-def get_ydl_opts(entry, config):
+def get_ydl_opts(entry, config, proxy=None):
     output_dir = entry.get('download_dir') or config.get('output_dir', DEFAULTS['output_dir'])
     playlist_title = entry.get('title', 'untitled')
     safe_title = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in playlist_title)
@@ -49,6 +57,7 @@ def get_ydl_opts(entry, config):
         'ignoreerrors': True,
         'noprogress': True,
         'quiet': True,
+        'no_color': True,
         'no_warnings': True,
         'extract_flat': False,
         'js_runtimes': {'node': {}},
@@ -61,5 +70,8 @@ def get_ydl_opts(entry, config):
 
     if config.get('archive_enabled', 'true') == 'true':
         opts['download_archive'] = archive_path
+
+    if proxy:
+        opts['proxy'] = proxy
 
     return opts

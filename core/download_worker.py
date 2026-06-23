@@ -2,21 +2,33 @@ import glob
 import os
 import sys
 import threading
-import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'yt-dlp-mastercode'))
 
+# Substrings yt-dlp prints (via the logger) when it skips a video because it is
+# already recorded in the download archive.
+ARCHIVE_SKIP_SIGNALS = (
+    'has already been recorded in the archive',
+    'has already been downloaded',
+)
+
 
 class LogAdapter:
-    def __init__(self, db, download_id, log_callback=None):
+    """Bridges yt-dlp's logger into our DB/SSE log, and watches the stream for
+    archive-skip notices so the worker can count re-checked videos."""
+
+    def __init__(self, db, download_id, log_callback=None, on_archive_skip=None):
         self.db = db
         self.download_id = download_id
         self.log_callback = log_callback
+        self.on_archive_skip = on_archive_skip
 
     def debug(self, msg):
+        if any(sig in msg for sig in ARCHIVE_SKIP_SIGNALS):
+            if self.on_archive_skip:
+                self.on_archive_skip(msg)
         if msg.startswith('[download]'):
             self._log('debug', msg)
-        pass
 
     def warning(self, msg):
         self._log('warning', msg)
@@ -31,18 +43,25 @@ class LogAdapter:
 
 
 class DownloadWorker(threading.Thread):
-    def __init__(self, entry, config, engine_manager, error_handler, db, log_callback=None):
+    def __init__(self, entry, config, engine_manager, error_handler, db,
+                 proxy_manager=None, log_callback=None):
         super().__init__(daemon=True)
         self.entry = entry
         self.download_id = entry['id']
         self.config = config
         self.engine_manager = engine_manager
         self.error_handler = error_handler
+        self.proxy_manager = proxy_manager
         self.db = db
         self.log_callback = log_callback
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
         self._pause_event.set()
+        self._active_proxy = None
+        # Track which videos we've already tallied so multi-file downloads
+        # (separate video+audio) don't double-count a single video.
+        self._counted_done = set()
+        self._counted_failed = set()
 
     def stop(self):
         self._stop_event.set()
@@ -54,6 +73,14 @@ class DownloadWorker(threading.Thread):
     def resume(self):
         self._pause_event.set()
 
+    def _current_proxy(self):
+        if self.proxy_manager is None:
+            return None
+        try:
+            return self.proxy_manager.get_proxy()
+        except Exception:
+            return None
+
     def run(self):
         try:
             self.db.set_status(self.download_id, 'extracting')
@@ -62,7 +89,11 @@ class DownloadWorker(threading.Thread):
             self._pre_fetch_metadata()
 
             entry = self.db.get_download(self.download_id)
-            if entry['status'] == 'paused' or entry['status'] == 'completed':
+            # Item may have been removed, paused, or already finished while we
+            # were extracting metadata.
+            if not entry or entry['status'] in ('paused', 'completed'):
+                return
+            if self._stop_event.is_set():
                 return
 
             self.db.set_status(self.download_id, 'downloading')
@@ -76,10 +107,14 @@ class DownloadWorker(threading.Thread):
         try:
             opts = {
                 'quiet': True,
+                'no_color': True,
                 'no_warnings': True,
                 'extract_flat': 'in_playlist',
                 'ignoreerrors': True,
             }
+            proxy = self._current_proxy()
+            if proxy:
+                opts['proxy'] = proxy
 
             self.engine_manager.register_worker()
             try:
@@ -105,34 +140,51 @@ class DownloadWorker(threading.Thread):
             self.db.update_download(self.download_id, title='Unknown')
 
     def _download(self):
+        from config import get_ydl_opts
+
+        entry = self.db.get_download(self.download_id)
+        proxy = self._current_proxy()
+        self._active_proxy = proxy
+        if proxy:
+            self._log('info', f'Routing download through proxy: {proxy}')
+
+        opts = get_ydl_opts(entry, self.config, proxy=proxy)
+        opts['progress_hooks'] = [self._on_progress]
+        opts['logger'] = LogAdapter(self.db, self.download_id, self.log_callback,
+                                    on_archive_skip=self._on_archive_skip)
+
         try:
-            from config import get_ydl_opts
-
-            entry = self.db.get_download(self.download_id)
-            opts = get_ydl_opts(entry, self.config)
-            opts['progress_hooks'] = [self._on_progress]
-            opts['logger'] = LogAdapter(self.db, self.download_id, self.log_callback)
-
             self.engine_manager.register_worker()
             try:
                 ydl = self.engine_manager.create_engine(opts)
                 ydl.download([self.entry['url']])
-
-                self.db.set_status(self.download_id, 'completed')
-                self._log('info', 'Download completed successfully')
-
             finally:
                 self.engine_manager.unregister_worker()
 
+            if proxy and self.proxy_manager:
+                self.proxy_manager.report_success(proxy)
+
+            self.db.set_status(self.download_id, 'completed', current_video=None,
+                               current_speed=None, current_eta=None)
+            self._log('info', 'Download completed successfully')
+
         except Exception as e:
             error_msg = str(e)
-            self._cleanup_part_files()
-            result = self.error_handler.handle_error(self.download_id, error_msg, entry)
+            # A pause/hotswap is a controlled interruption, not a failure.
+            if 'hotswap' in error_msg or self._stop_event.is_set():
+                return
 
-            if result == 'retry' or result == 'rate_limited':
-                pass
-            elif result == 'failed':
-                pass
+            if proxy and self.proxy_manager:
+                self.proxy_manager.report_failure(proxy)
+
+            result = self.error_handler.handle_error(self.download_id, error_msg, entry)
+            # 'failed' is terminal: clean up partial files. 'retry'/'rate_limited'
+            # leave .part files in place so yt-dlp can resume the next attempt.
+            if result == 'failed':
+                self._cleanup_part_files()
+
+    def _on_archive_skip(self, msg):
+        self.db.increment_download(self.download_id, archived_videos=1)
 
     def _on_progress(self, d):
         if self._stop_event.is_set():
@@ -168,13 +220,22 @@ class DownloadWorker(threading.Thread):
                 self._log('debug', f'Downloading: {title} - {pct:.1f}% at {speed_str} ETA {eta_str}')
 
         elif status == 'finished':
-            self.db.update_download(
-                self.download_id,
-                completed_videos=self.db.get_download(self.download_id).get('completed_videos', 0) + 1,
-                current_speed=None,
-                current_eta=None
-            )
-            self._log('info', f'Finished: {d.get("info_dict", {}).get("title", "video")}')
+            # Count the parent video once, even though separate video/audio
+            # streams each emit their own 'finished' event.
+            info = d.get('info_dict', {})
+            key = info.get('id') or info.get('display_id') or d.get('filename')
+            if key not in self._counted_done:
+                self._counted_done.add(key)
+                self.db.increment_download(self.download_id, completed_videos=1)
+            self.db.update_download(self.download_id, current_speed=None, current_eta=None)
+            self._log('info', f'Finished: {info.get("title", "video")}')
+
+        elif status == 'error':
+            info = d.get('info_dict', {})
+            key = info.get('id') or info.get('display_id') or d.get('filename')
+            if key not in self._counted_failed:
+                self._counted_failed.add(key)
+                self.db.increment_download(self.download_id, failed_videos=1)
 
     def _cleanup_part_files(self):
         try:

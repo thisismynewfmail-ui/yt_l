@@ -11,6 +11,7 @@
         <div class="header-left">
             <h1>YT-DLP Downloader</h1>
             <span id="engine-version" class="badge">v...</span>
+            <span id="proxy-status" class="badge badge-proxy" title="Proxy system status">proxy: off</span>
         </div>
         <div class="header-right">
             <button id="btn-update-engine" class="btn btn-small btn-warning" title="Update yt-dlp engine">Update Engine</button>
@@ -34,8 +35,13 @@
             <div class="stat"><span class="stat-label">Failed:</span> <span id="stat-failed">0</span></div>
             <div class="stat"><span class="stat-label">Total:</span> <span id="stat-total">0</span></div>
             <div class="stat-divider"></div>
+            <div class="stat" title="Videos downloaded across all items"><span class="stat-label">Videos:</span> <span id="stat-videos">0</span></div>
+            <div class="stat" title="Videos skipped because already in the archive (re-checks)"><span class="stat-label">Archived:</span> <span id="stat-archived">0</span></div>
+            <div class="stat" title="Total times items have been re-checked from the top"><span class="stat-label">Re-checks:</span> <span id="stat-rechecks">0</span></div>
+            <div class="stat-divider"></div>
             <button id="btn-pause-all" class="btn btn-small btn-warning">Pause All</button>
             <button id="btn-resume-all" class="btn btn-small btn-success">Resume Next</button>
+            <button id="btn-restart-all" class="btn btn-small btn-secondary" title="Re-queue every finished item from the top">Restart All</button>
         </section>
 
         <section class="queue-section">
@@ -90,6 +96,30 @@
                 <div class="form-group">
                     <label><input type="checkbox" id="cfg-archive-enabled" checked> Enable download archive (skip already downloaded)</label>
                 </div>
+                <hr>
+                <h3>Proxy System</h3>
+                <div class="form-group">
+                    <label for="cfg-proxy-mode">Proxy Mode</label>
+                    <select id="cfg-proxy-mode">
+                        <option value="off">Off &mdash; direct connection</option>
+                        <option value="auto">Auto &mdash; engage on rate-limit / errors</option>
+                        <option value="always">Always on</option>
+                    </select>
+                </div>
+                <div class="form-group form-row">
+                    <label for="cfg-proxy-seconds">Auto switch-off after (seconds)</label>
+                    <input type="number" id="cfg-proxy-seconds" min="1" max="86400" value="600">
+                </div>
+                <div class="form-group">
+                    <label for="cfg-proxy-list">Proxy list (optional, one <code>scheme://host:port</code> per line). Leave blank to auto-source a wide pool of public proxies.</label>
+                    <textarea id="cfg-proxy-list" rows="3" placeholder="socks5://1.2.3.4:1080&#10;http://5.6.7.8:8080"></textarea>
+                </div>
+                <div class="form-group proxy-controls">
+                    <button id="btn-proxy-refresh" class="btn btn-small btn-secondary" type="button">Refresh Pool</button>
+                    <button id="btn-proxy-test" class="btn btn-small btn-secondary" type="button">Health Check</button>
+                    <button id="btn-proxy-disengage" class="btn btn-small btn-warning" type="button">Disengage Now</button>
+                </div>
+                <div id="proxy-detail" class="proxy-detail">Proxy pool: not loaded.</div>
                 <hr>
                 <h3>Scheduled Restart</h3>
                 <div class="form-group">

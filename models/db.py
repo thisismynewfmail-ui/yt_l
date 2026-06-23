@@ -3,7 +3,12 @@ import os
 import threading
 from datetime import datetime
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'app.db')
+# Allow overriding the database location (used for tests so the real app.db is
+# never touched). Falls back to the bundled data/app.db.
+DB_PATH = os.environ.get(
+    'YTDLP_DB_PATH',
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'app.db')
+)
 
 _local = threading.local()
 
@@ -19,10 +24,13 @@ CREATE TABLE IF NOT EXISTS downloads (
     total_videos INTEGER DEFAULT 0,
     completed_videos INTEGER DEFAULT 0,
     failed_videos INTEGER DEFAULT 0,
+    archived_videos INTEGER DEFAULT 0,
+    recheck_count INTEGER DEFAULT 0,
     current_video TEXT DEFAULT NULL,
     current_speed REAL DEFAULT NULL,
     current_eta INTEGER DEFAULT NULL,
     error_message TEXT DEFAULT NULL,
+    last_checked_at TIMESTAMP DEFAULT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -56,9 +64,28 @@ def get_conn():
     return _local.conn
 
 
+# Columns added after the initial release. (name -> column definition) These are
+# applied to pre-existing databases via a lightweight migration so upgrades do
+# not require dropping the data.
+_MIGRATION_COLUMNS = {
+    'archived_videos': 'INTEGER DEFAULT 0',
+    'recheck_count': 'INTEGER DEFAULT 0',
+    'last_checked_at': 'TIMESTAMP DEFAULT NULL',
+}
+
+
+def _migrate(conn):
+    existing = {row['name'] for row in conn.execute("PRAGMA table_info(downloads)")}
+    for col, ddl in _MIGRATION_COLUMNS.items():
+        if col not in existing:
+            conn.execute(f"ALTER TABLE downloads ADD COLUMN {col} {ddl}")
+    conn.commit()
+
+
 def init_db():
     conn = get_conn()
     conn.executescript(SCHEMA)
+    _migrate(conn)
     conn.commit()
 
 
@@ -103,6 +130,45 @@ def update_download(download_id, **kwargs):
     conn = get_conn()
     conn.execute(f"UPDATE downloads SET {sets} WHERE id = ?", vals)
     conn.commit()
+
+
+def increment_download(download_id, **kwargs):
+    """Atomically increment integer columns (e.g. completed_videos=1).
+
+    Using a single UPDATE ... SET col = col + ? avoids the read-modify-write
+    race that corrupted counts when progress hooks fired concurrently.
+    Returns the updated row as a dict.
+    """
+    if not kwargs:
+        return get_download(download_id)
+    sets = ', '.join(f"{k} = {k} + ?" for k in kwargs)
+    vals = list(kwargs.values())
+    conn = get_conn()
+    conn.execute(
+        f"UPDATE downloads SET {sets}, updated_at = ? WHERE id = ?",
+        vals + [datetime.utcnow().isoformat(), download_id]
+    )
+    conn.commit()
+    return get_download(download_id)
+
+
+def reset_progress_counters(download_id, **extra):
+    """Reset per-pass counters so a restarted/re-checked item counts fresh.
+
+    Keeps the download row but zeroes the counts that describe a single pass
+    over the queue item. ``extra`` lets callers also set other columns
+    (status, retry_count, error_message, ...) in the same write.
+    """
+    update_download(
+        download_id,
+        completed_videos=0,
+        failed_videos=0,
+        archived_videos=0,
+        current_video=None,
+        current_speed=None,
+        current_eta=None,
+        **extra
+    )
 
 
 def delete_download(download_id):
@@ -183,7 +249,15 @@ def get_stats():
             SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
             SUM(CASE WHEN status = 'rate_limited' THEN 1 ELSE 0 END) as rate_limited,
             SUM(completed_videos) as total_completed_videos,
-            SUM(total_videos) as total_videos_all
+            SUM(failed_videos) as total_failed_videos,
+            SUM(archived_videos) as total_archived_videos,
+            SUM(total_videos) as total_videos_all,
+            SUM(recheck_count) as total_rechecks
         FROM downloads
     """).fetchone()
-    return _row_to_dict(row)
+    stats = _row_to_dict(row)
+    # COUNT/SUM over an empty table yields NULLs; normalise to 0 for the UI.
+    for key, value in list(stats.items()):
+        if value is None:
+            stats[key] = 0
+    return stats
