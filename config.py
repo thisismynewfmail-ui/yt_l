@@ -66,6 +66,10 @@ def get_ydl_opts(entry, config, proxy=None):
         'remote_components': {'ejs:github'},
         'retries': 10,
         'fragment_retries': 10,
+        # Retry the extraction request 3 times (e.g. a flaky proxy connection)
+        # before giving up; the worker then rotates to a fresh proxy and
+        # re-queues. This is what bounds "try 3 times, then switch proxy".
+        'extractor_retries': 3,
         'file_access_retries': 3,
         'skip_unavailable_fragments': True,
     }

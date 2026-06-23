@@ -35,16 +35,18 @@ from urllib.parse import urlparse
 from urllib.request import build_opener, ProxyHandler, Request, urlopen
 
 
-# Candidate proxy lists, ordered best-first. Elite + SSL-capable proxies are
-# the most likely to survive Google/YouTube, so those sources come first; the
-# broad GitHub lists are kept as a wide fallback pool.
+# Candidate proxy lists, ordered best-first. proxyscrape's ``ssl=yes`` returns
+# HTTP proxies that can *tunnel* HTTPS targets (via CONNECT) -- the proxy
+# endpoint itself still speaks plain HTTP, so these are 'http' proxies, NOT
+# 'https'. (Labelling them 'https' makes urllib/yt-dlp attempt a TLS handshake
+# with a plain HTTP proxy, which fails with "SSL: WRONG_VERSION_NUMBER".)
 DEFAULT_PROXY_SOURCES = [
-    ('https', 'https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=7000&ssl=yes&anonymity=elite'),
+    ('http', 'https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=7000&ssl=yes&anonymity=elite'),
     ('socks5', 'https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=7000'),
     ('socks5', 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt'),
-    ('https', 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt'),
+    ('http', 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt'),
     ('socks5', 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt'),
-    ('https', 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt'),
+    ('http', 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt'),
 ]
 
 # Last-resort static seed used only when no user list is configured and the

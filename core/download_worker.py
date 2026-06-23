@@ -212,8 +212,9 @@ class DownloadWorker(threading.Thread):
         etype = self.error_handler.detect_error_type(msg)
         proxy_switched = False
         if self.proxy_manager is not None and etype in ('rate_limit', 'network_error'):
-            # A YouTube bot-check means the IP is flagged: mark it bad outright.
-            hard = self._is_bot_check(msg)
+            # A YouTube bot-check (flagged IP) or a broken/unreachable proxy is
+            # worthless going forward -- mark it bad outright and rotate off it.
+            hard = self._is_bot_check(msg) or self._is_proxy_error(msg)
             new_proxy = self.proxy_manager.trigger(
                 self._short_reason(msg), failed_proxy=self._active_proxy, hard=hard)
             proxy_switched = new_proxy is not None
@@ -237,10 +238,19 @@ class DownloadWorker(threading.Thread):
         return 'not a bot' in low or 'sign in to confirm' in low
 
     @staticmethod
+    def _is_proxy_error(msg):
+        low = str(msg).lower()
+        return ('unable to connect to proxy' in low or 'cannot connect to proxy' in low
+                or 'wrong_version_number' in low or 'your proxy appears' in low
+                or 'tunnel connection failed' in low or 'proxyerror' in low)
+
+    @staticmethod
     def _short_reason(msg):
         low = str(msg).lower()
         if 'not a bot' in low or 'sign in to confirm' in low:
             return 'youtube bot-check'
+        if ('proxy' in low or 'wrong_version_number' in low):
+            return 'broken proxy connection'
         if 'http error 429' in low or 'too many requests' in low:
             return 'rate limit (429)'
         return 'network/blocking error'

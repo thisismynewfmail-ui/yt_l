@@ -13,7 +13,9 @@ RATE_LIMIT_SIGNALS = [
     "you are downloading too fast",
 ]
 
-# Network-level failures that a proxy switch can plausibly get past.
+# Network-level failures that a proxy switch can plausibly get past. Includes
+# broken-proxy signals (a dead proxy, or an HTTP-only proxy that can't tunnel
+# HTTPS -> "SSL: WRONG_VERSION_NUMBER") so we rotate off it.
 NETWORK_SIGNALS = [
     "http error 403",
     "connection reset",
@@ -22,9 +24,14 @@ NETWORK_SIGNALS = [
     "timed out",
     "temporary failure in name resolution",
     "unable to connect",
+    "unable to connect to proxy",
+    "cannot connect to proxy",
     "tunnel connection failed",
     "remote end closed connection",
     "unable to download webpage",
+    "wrong_version_number",
+    "your proxy appears",
+    "proxyerror",
 ]
 
 # Escalating cool-down used when we have NO fresh proxy to switch to and must
