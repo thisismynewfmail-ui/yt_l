@@ -35,6 +35,10 @@ class DownloadScheduler:
             time.sleep(30)
 
     def _do_scheduled_restart(self):
-        self.manager.pause_all()
-        time.sleep(300)
-        self.manager.resume_all()
+        # Re-queue the whole archive from the top for a fresh nightly pass.
+        # (Previously this called manager.resume_all(), which did not exist and
+        # raised AttributeError, so scheduled restarts silently never ran.)
+        try:
+            self.manager.scheduled_restart()
+        except Exception:
+            pass

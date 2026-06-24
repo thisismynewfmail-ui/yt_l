@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# App runtime / local state
+config.json
+downloads/
+data/*.db-wal
+data/*.db-shm
+
+# Virtualenvs
+.venv/
+venv/
+env/
