@@ -48,11 +48,16 @@ const Components = (() => {
 
   function renderQueueItem(d) {
     const total = d.total_videos || 0;
-    const done = d.completed_videos || 0;
-    const pct = total > 0 ? Math.min(100, (done / total) * 100) : (done > 0 ? 100 : 0);
+    const downloaded = d.completed_videos || 0;   // freshly downloaded this pass
+    const archived = d.archived_videos || 0;      // skipped: already in archive
+    const accounted = downloaded + archived;      // everything done / not pending
+    const pct = total > 0 ? Math.min(100, (accounted / total) * 100) : (accounted > 0 ? 100 : 0);
 
-    const counts = [`${done}/${total || '?'} videos`];
-    if (d.archived_videos) counts.push(`${d.archived_videos} archived`);
+    // "accounted/total" drives the bar; downloaded vs archived are shown apart so
+    // a video that was skipped (already archived) never reads as freshly downloaded.
+    const counts = [`${accounted}/${total || '?'} videos`];
+    if (downloaded) counts.push(`${downloaded} downloaded`);
+    if (archived) counts.push(`${archived} already archived`);
     if (d.failed_videos) counts.push(`${d.failed_videos} failed`);
     if (d.recheck_count) counts.push(`re-check #${d.recheck_count}`);
 
@@ -122,7 +127,8 @@ const Components = (() => {
       el.classList.add('proxy-auto');
     }
     el.textContent = text;
-    el.title = `Mode: ${p.mode} · pool: ${p.pool_size} (good ${p.good}, bad ${p.bad})`;
+    el.title = `Mode: ${p.mode} · pool: ${p.pool_size} `
+             + `(good ${p.good}, bad ${p.bad}, saved ${p.favorites || 0})`;
   }
 
   function renderProxyDetail(p) {
@@ -131,6 +137,7 @@ const Components = (() => {
     const parts = [
       `mode: ${p.mode}`,
       `pool: ${p.pool_size} (good ${p.good}, bad ${p.bad})`,
+      `saved good: ${p.favorites || 0}`,
       p.active ? `ACTIVE → ${p.current || 'n/a'}` : 'inactive',
     ];
     if (p.active && p.seconds_remaining) parts.push(`auto-off in ${p.seconds_remaining}s`);

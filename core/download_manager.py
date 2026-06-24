@@ -136,6 +136,7 @@ class DownloadManager:
                     entry['id'],
                     status='queued',
                     retry_count=0,
+                    proxy_rotations=0,
                     error_message=None,
                     recheck_count=(entry.get('recheck_count') or 0) + 1,
                     last_checked_at=datetime.utcnow().isoformat(),
@@ -245,6 +246,7 @@ class DownloadManager:
             download_id,
             status='queued',
             retry_count=0,
+            proxy_rotations=0,
             error_message=None,
         )
         self._idle_since = None

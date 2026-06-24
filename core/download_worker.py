@@ -164,6 +164,17 @@ class DownloadWorker(threading.Thread):
         self._active_proxy = proxy
         self._blocking_error = None
         self._abort_raised = False
+
+        # Start this pass's per-item tallies from zero. Each run re-processes the
+        # playlist from the top, so without this an automatic retry (after a
+        # bot-check / proxy switch) would ADD a second pass's archive-skips and
+        # downloads on top of the aborted attempt -- inflating the counts and
+        # making skipped videos look downloaded. retry_count / proxy_rotations
+        # are deliberately NOT reset here (they bound the cross-run retry loop).
+        self.db.reset_progress_counters(self.download_id)
+        self._counted_done.clear()
+        self._counted_failed.clear()
+
         if proxy:
             self._log('info', f'Routing download through proxy: {proxy}')
 
@@ -235,7 +246,9 @@ class DownloadWorker(threading.Thread):
     @staticmethod
     def _is_bot_check(msg):
         low = str(msg).lower()
-        return 'not a bot' in low or 'sign in to confirm' in low
+        return ('not a bot' in low or 'sign in to confirm' in low
+                or 'unusual traffic' in low or 'automated queries' in low
+                or 'captcha' in low or 'verify you' in low)
 
     @staticmethod
     def _is_proxy_error(msg):
@@ -247,7 +260,9 @@ class DownloadWorker(threading.Thread):
     @staticmethod
     def _short_reason(msg):
         low = str(msg).lower()
-        if 'not a bot' in low or 'sign in to confirm' in low:
+        if ('not a bot' in low or 'sign in to confirm' in low
+                or 'unusual traffic' in low or 'captcha' in low
+                or 'automated queries' in low or 'verify you' in low):
             return 'youtube bot-check'
         if ('proxy' in low or 'wrong_version_number' in low):
             return 'broken proxy connection'
@@ -310,6 +325,11 @@ class DownloadWorker(threading.Thread):
                 self._log('debug', f'Downloading: {title} - {pct:.1f}% at {speed_str} ETA {eta_str}')
 
         elif status == 'finished':
+            # A blocking error (bot-check / rate-limit / network) already flagged
+            # this run for abort -- do NOT tally anything as completed, so a
+            # video that was really skipped/blocked never counts as downloaded.
+            if self._abort_raised or self._blocking_error:
+                return
             # Count the parent video once, even though separate video/audio
             # streams each emit their own 'finished' event.
             info = d.get('info_dict', {})
