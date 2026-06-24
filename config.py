@@ -16,9 +16,12 @@ DEFAULTS = {
     'scheduled_restart_hour': '3',
     'scheduled_restart_minute': '0',
     # Proxy system. mode: off | auto | always.
-    # In 'auto' mode the proxy engages itself on rate-limits/errors and turns
-    # back off after proxy_active_seconds of not being needed.
-    'proxy_mode': 'off',
+    # Default 'auto': normal downloads run on a direct connection, but the
+    # moment a rate-limit / YouTube bot-check / network error is hit the proxy
+    # system engages itself and rotates to a fresh proxy, then turns back off
+    # after proxy_active_seconds of not being needed. This is what makes a
+    # bot-check actually switch IPs instead of failing the item.
+    'proxy_mode': 'auto',
     'proxy_active_seconds': '600',
     # Optional explicit proxy list (newline/comma separated, scheme://host:port).
     # Leave blank to auto-source a wide pool of public proxies.

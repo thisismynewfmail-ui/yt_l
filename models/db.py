@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS downloads (
     failed_videos INTEGER DEFAULT 0,
     archived_videos INTEGER DEFAULT 0,
     recheck_count INTEGER DEFAULT 0,
+    proxy_rotations INTEGER DEFAULT 0,
     current_video TEXT DEFAULT NULL,
     current_speed REAL DEFAULT NULL,
     current_eta INTEGER DEFAULT NULL,
@@ -71,6 +72,10 @@ _MIGRATION_COLUMNS = {
     'archived_videos': 'INTEGER DEFAULT 0',
     'recheck_count': 'INTEGER DEFAULT 0',
     'last_checked_at': 'TIMESTAMP DEFAULT NULL',
+    # Cross-run counter: how many times we have rotated to a fresh proxy trying
+    # to get this item past a block. Kept separate from retry_count so proxy
+    # rotations don't burn the (small) wait-out retry budget.
+    'proxy_rotations': 'INTEGER DEFAULT 0',
 }
 
 

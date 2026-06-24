@@ -41,12 +41,34 @@ from urllib.request import build_opener, ProxyHandler, Request, urlopen
 # 'https'. (Labelling them 'https' makes urllib/yt-dlp attempt a TLS handshake
 # with a plain HTTP proxy, which fails with "SSL: WRONG_VERSION_NUMBER".)
 DEFAULT_PROXY_SOURCES = [
+    # --- proxyscrape (v4 is current; v2 kept as a backup) ---------------------
+    ('http', 'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&proxy_format=ipport&format=text&timeout=7000'),
+    ('socks5', 'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&proxy_format=ipport&format=text&timeout=7000'),
+    ('socks4', 'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks4&proxy_format=ipport&format=text&timeout=7000'),
     ('http', 'https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=7000&ssl=yes&anonymity=elite'),
     ('socks5', 'https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=7000'),
+    # --- monosans (frequently updated & pre-validated) -----------------------
     ('socks5', 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt'),
+    ('socks4', 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks4.txt'),
     ('http', 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt'),
+    # --- TheSpeedX/PROXY-List ------------------------------------------------
     ('socks5', 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt'),
+    ('socks4', 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt'),
     ('http', 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt'),
+    # --- proxifly (scheme-prefixed lines; normalize_proxy handles them) ------
+    ('http', 'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt'),
+    ('socks5', 'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt'),
+    # --- hookzof (socks5) ----------------------------------------------------
+    ('socks5', 'https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt'),
+    # --- jetkai (online-checked) ---------------------------------------------
+    ('http', 'https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt'),
+    ('socks5', 'https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt'),
+    # --- ShiftyTR ------------------------------------------------------------
+    ('http', 'https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt'),
+    ('socks5', 'https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt'),
+    # --- mmpx12 --------------------------------------------------------------
+    ('http', 'https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt'),
+    ('socks5', 'https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks5.txt'),
 ]
 
 # Last-resort static seed used only when no user list is configured and the
@@ -56,16 +78,23 @@ DEFAULT_SEED_PROXIES = [
     'socks5://98.178.72.21:10919',
     'socks5://184.178.172.25:15291',
     'socks5://72.206.181.105:64935',
+    'socks5://184.178.172.18:15280',
+    'socks5://174.77.111.197:4145',
+    'socks5://192.111.137.35:18302',
+    'socks4://199.187.210.54:4145',
     'http://51.158.169.52:29976',
     'http://8.219.97.248:80',
+    'http://47.74.152.29:8888',
+    'http://158.255.77.166:80',
 ]
 
 MODES = ('off', 'auto', 'always')
 
 # How many consecutive failures before a proxy is considered bad and skipped.
 FAIL_THRESHOLD = 2
-# Cap the working pool so refreshes/health-checks stay fast.
-MAX_POOL = 250
+# Cap the working pool so refreshes/health-checks stay fast. A larger cap gives
+# the rotator far more candidates to fall back on when free proxies get flagged.
+MAX_POOL = 500
 # Per-candidate connect timeout (seconds) for the reachability/validation check.
 PROBE_TIMEOUT = 7
 # Tiny Google endpoint that returns HTTP 204. Reaching it through a proxy is a
