@@ -209,7 +209,15 @@ class DownloadManager:
     def remove_download(self, download_id):
         """Stop any worker and delete the item from the queue + its logs.
 
-        NOTE: we intentionally do *not* sweep ``*.part`` files from the shared
+        IMPORTANT: removing a playlist only drops its *queue row* and logs. The
+        downloaded video files and the yt-dlp archive (``.archive.txt``) are
+        deliberately left untouched on disk, so:
+          * the user never loses videos they already downloaded, and
+          * if the same playlist is added again, the already-downloaded videos
+            are detected (by title -- see DownloadWorker's match_filter) and
+            skipped instead of being fetched a second time.
+
+        We also intentionally do *not* sweep ``*.part`` files from the shared
         output directory here -- doing so previously deleted the partial files
         of *other* concurrent downloads. yt-dlp safely resumes from leftover
         .part files, so they are harmless to leave behind.

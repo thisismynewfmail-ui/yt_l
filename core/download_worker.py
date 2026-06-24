@@ -3,6 +3,8 @@ import os
 import sys
 import threading
 
+from core import local_library
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'yt-dlp-mastercode'))
 
 # Substrings yt-dlp prints (via the logger) when it skips a video because it is
@@ -75,6 +77,11 @@ class DownloadWorker(threading.Thread):
         # (separate video+audio) don't double-count a single video.
         self._counted_done = set()
         self._counted_failed = set()
+        # Videos skipped this run because a file with that title already exists
+        # on disk (title-based "already downloaded" detection). Tracked so a
+        # video isn't counted twice if the filter fires for both the flat and
+        # the full extraction pass.
+        self._counted_title_skips = set()
         # Set when a blocking error (bot-check / rate-limit / network) is seen
         # so we abort and retry on a fresh proxy instead of skipping the video.
         self._blocking_error = None
@@ -149,6 +156,7 @@ class DownloadWorker(threading.Thread):
                         total_videos=total
                     )
                     self._log('info', f'Found: {title} ({total} videos)')
+                    self._report_already_downloaded(title, entries, total)
             finally:
                 self.engine_manager.unregister_worker()
 
@@ -174,12 +182,17 @@ class DownloadWorker(threading.Thread):
         self.db.reset_progress_counters(self.download_id)
         self._counted_done.clear()
         self._counted_failed.clear()
+        self._counted_title_skips.clear()
 
         if proxy:
             self._log('info', f'Routing download through proxy: {proxy}')
 
         opts = get_ydl_opts(entry, self.config, proxy=proxy)
         opts['progress_hooks'] = [self._on_progress]
+        # Skip videos already present on disk, matched by title. This lets a
+        # re-added playlist pick up where it left off even if the ID archive
+        # (.archive.txt) was lost or disabled -- detection is by title.
+        opts['match_filter'] = self._make_already_downloaded_filter(entry)
         opts['logger'] = LogAdapter(self.db, self.download_id, self.log_callback,
                                     on_archive_skip=self._on_archive_skip,
                                     on_error=self._on_engine_error)
@@ -285,6 +298,82 @@ class DownloadWorker(threading.Thread):
 
     def _on_archive_skip(self, msg):
         self.db.increment_download(self.download_id, archived_videos=1)
+
+    def _report_already_downloaded(self, playlist_title, entries, total):
+        """Log how many of the playlist's videos are already on disk by title.
+
+        Purely informational (the actual skipping happens via the match_filter
+        during the download). Lets the user see, up front, that a re-added
+        playlist recognised its existing files instead of starting from zero.
+        """
+        try:
+            from config import get_media_dir
+            entry = {
+                'download_dir': self.entry.get('download_dir'),
+                'url': self.entry.get('url'),
+                'total_videos': total,
+                'title': playlist_title,
+            }
+            media_dir = get_media_dir(entry, self.config, playlist_title=playlist_title)
+            present = local_library.scan_titles(media_dir)
+            if not present:
+                return
+            titles = [e.get('title') for e in (entries or []) if isinstance(e, dict)]
+            # A single video item has no flat entries; check the item title.
+            if not titles and playlist_title:
+                titles = [playlist_title]
+            already = sum(1 for t in titles if local_library.is_downloaded(t, present))
+            if already:
+                self._log('info',
+                          f'{already} of {total} video(s) already downloaded '
+                          f'(detected by title); they will be skipped.')
+        except Exception:
+            pass
+
+    def _make_already_downloaded_filter(self, entry):
+        """Build a yt-dlp ``match_filter`` that skips videos already on disk,
+        matched by title, and counts them as archived/skipped.
+
+        Each playlist folder is scanned once and cached, so the filter stays
+        cheap even for long playlists.
+        """
+        from config import get_media_dir
+        dir_cache = {}
+
+        def _filter(info_dict, *args, **kwargs):
+            try:
+                if not isinstance(info_dict, dict):
+                    return None
+                # Only filter individual videos, never the playlist container.
+                if info_dict.get('_type') == 'playlist':
+                    return None
+                title = info_dict.get('title')
+                if not title:
+                    return None
+                media_dir = get_media_dir(
+                    entry, self.config,
+                    playlist_title=info_dict.get('playlist_title') or entry.get('title'))
+                present = dir_cache.get(media_dir)
+                if present is None:
+                    present = local_library.scan_titles(media_dir)
+                    dir_cache[media_dir] = present
+                if local_library.is_downloaded(title, present):
+                    self._on_title_skip(info_dict)
+                    return f'already on disk (matched by title): {title}'
+            except Exception:
+                return None
+            return None
+
+        return _filter
+
+    def _on_title_skip(self, info_dict):
+        """Count a video skipped because its title already exists on disk."""
+        key = info_dict.get('id') or info_dict.get('title')
+        if key in self._counted_title_skips:
+            return
+        self._counted_title_skips.add(key)
+        self.db.increment_download(self.download_id, archived_videos=1)
+        self._log('info', f'Already downloaded, skipping by title: {info_dict.get("title")}')
 
     def _on_progress(self, d):
         if self._stop_event.is_set():
