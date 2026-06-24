@@ -7,6 +7,7 @@ config.json
 downloads/
 data/*.db-wal
 data/*.db-shm
+data/good_proxies.json
 
 # Virtualenvs
 .venv/

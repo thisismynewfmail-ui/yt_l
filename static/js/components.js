@@ -127,7 +127,8 @@ const Components = (() => {
       el.classList.add('proxy-auto');
     }
     el.textContent = text;
-    el.title = `Mode: ${p.mode} · pool: ${p.pool_size} (good ${p.good}, bad ${p.bad})`;
+    el.title = `Mode: ${p.mode} · pool: ${p.pool_size} `
+             + `(good ${p.good}, bad ${p.bad}, saved ${p.favorites || 0})`;
   }
 
   function renderProxyDetail(p) {
@@ -136,6 +137,7 @@ const Components = (() => {
     const parts = [
       `mode: ${p.mode}`,
       `pool: ${p.pool_size} (good ${p.good}, bad ${p.bad})`,
+      `saved good: ${p.favorites || 0}`,
       p.active ? `ACTIVE → ${p.current || 'n/a'}` : 'inactive',
     ];
     if (p.active && p.seconds_remaining) parts.push(`auto-off in ${p.seconds_remaining}s`);

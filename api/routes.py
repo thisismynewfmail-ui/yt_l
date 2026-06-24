@@ -119,6 +119,7 @@ def proxy_status():
     pm = _manager.proxy_manager
     status = pm.status()
     status['pool'] = pm.list_pool(limit=50)
+    status['favorites_list'] = pm.list_favorites(limit=50)
     return jsonify(status)
 
 
