@@ -14,6 +14,14 @@ ARCHIVE_SKIP_SIGNALS = (
     'has already been downloaded',
 )
 
+# How many blocking errors (YouTube bot-check / rate-limit / network) seen
+# back-to-back before we abort the whole playlist run. A flagged IP fails EVERY
+# video, so a short streak is the unmistakable signature of "stop hammering and
+# pause / rotate". A lone unavailable/private video is a different error type
+# that resets the streak, so a healthy playlist with scattered dead videos is
+# never aborted.
+BLOCKING_ABORT_THRESHOLD = 3
+
 
 class BlockingError(Exception):
     """Raised to abort a run when a blocking error (YouTube bot-check /
@@ -86,6 +94,9 @@ class DownloadWorker(threading.Thread):
         # so we abort and retry on a fresh proxy instead of skipping the video.
         self._blocking_error = None
         self._abort_raised = False
+        # Blocking errors seen back-to-back this run; a flagged IP trips this
+        # quickly and aborts the run (see _on_engine_error).
+        self._consecutive_blocking = 0
 
     def stop(self):
         self._stop_event.set()
@@ -172,6 +183,7 @@ class DownloadWorker(threading.Thread):
         self._active_proxy = proxy
         self._blocking_error = None
         self._abort_raised = False
+        self._consecutive_blocking = 0
 
         # Start this pass's per-item tallies from zero. Each run re-processes the
         # playlist from the top, so without this an automatic retry (after a
@@ -286,15 +298,42 @@ class DownloadWorker(threading.Thread):
     def _on_engine_error(self, msg):
         """Called for every yt-dlp ERROR line (even ones ignoreerrors swallows).
 
-        Records the first blocking error and aborts the run early so we don't
-        keep hammering a flagged IP for the rest of the playlist."""
+        Records the first blocking error and, once a few blocking errors occur
+        back-to-back -- the signature of a flagged IP where every video fails --
+        aborts the whole run. The abort is raised as yt-dlp's ``DownloadCancelled``
+        which, unlike a generic exception, ``ignoreerrors`` does NOT swallow, so
+        the playlist actually stops here instead of churning through every
+        remaining item before the worker can pause / rotate."""
         etype = self.error_handler.detect_error_type(msg)
         if etype in ('rate_limit', 'network_error'):
             if self._blocking_error is None:
                 self._blocking_error = msg
-            if not self._abort_raised:
+            self._consecutive_blocking += 1
+            if (not self._abort_raised
+                    and self._consecutive_blocking >= BLOCKING_ABORT_THRESHOLD):
                 self._abort_raised = True
-                raise BlockingError(msg)
+                raise self._abort_exception(self._blocking_error)
+        else:
+            # A non-blocking error (e.g. a single private/unavailable video)
+            # breaks the streak, so a healthy playlist with scattered dead
+            # videos is never mistaken for a flagged IP.
+            self._consecutive_blocking = 0
+
+    @staticmethod
+    def _abort_exception(msg):
+        """Exception raised to stop a run on repeated blocking errors.
+
+        Prefers yt-dlp's ``DownloadCancelled``: ``ignoreerrors`` swallows
+        ordinary exceptions raised from the logger, but ``DownloadCancelled`` is
+        explicitly re-raised by the engine (it is how ``--max-downloads`` /
+        ``--break-on-existing`` stop a playlist), so it reliably aborts. Falls
+        back to ``BlockingError`` when the engine isn't importable (e.g. tests)."""
+        try:
+            from yt_dlp.utils import DownloadCancelled
+            return DownloadCancelled(
+                f'Stopping run after repeated blocking errors: {msg}')
+        except Exception:
+            return BlockingError(msg)
 
     def _on_archive_skip(self, msg):
         self.db.increment_download(self.download_id, archived_videos=1)
@@ -384,7 +423,7 @@ class DownloadWorker(threading.Thread):
         # If a blocking error was seen but couldn't abort from the logger (e.g.
         # the engine swallowed it), abort now that a hook is firing.
         if self._abort_raised:
-            raise BlockingError(self._blocking_error or 'blocking error')
+            raise self._abort_exception(self._blocking_error or 'blocking error')
 
         if self.engine_manager.update_in_progress:
             self._log('info', 'Engine update in progress. Pausing for hotswap.')
@@ -414,6 +453,10 @@ class DownloadWorker(threading.Thread):
                 self._log('debug', f'Downloading: {title} - {pct:.1f}% at {speed_str} ETA {eta_str}')
 
         elif status == 'finished':
+            # A real download landed, so the IP clearly isn't (fully) blocked --
+            # reset the consecutive-blocking streak so sporadic errors between
+            # successes never trip the early abort.
+            self._consecutive_blocking = 0
             # A blocking error (bot-check / rate-limit / network) already flagged
             # this run for abort -- do NOT tally anything as completed, so a
             # video that was really skipped/blocked never counts as downloaded.
