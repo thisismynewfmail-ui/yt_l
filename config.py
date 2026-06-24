@@ -27,6 +27,11 @@ DEFAULTS = {
     # Optional explicit proxy list (newline/comma separated, scheme://host:port).
     # Leave blank to auto-source a wide pool of public proxies.
     'proxy_list': '',
+    # When proxies are OFF and a YouTube bot-check / rate-limit is hit, there is
+    # no IP to rotate to, so the item is paused for this many seconds and then
+    # auto-resumed (a deliberate, user-tunable self-throttle: backing off is the
+    # only way past the block without a fresh proxy). Set in the UI in seconds.
+    'botcheck_pause_seconds': '600',
 }
 
 

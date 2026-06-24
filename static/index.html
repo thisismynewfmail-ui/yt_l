@@ -110,6 +110,10 @@
                     <label for="cfg-proxy-seconds">Auto switch-off after (seconds)</label>
                     <input type="number" id="cfg-proxy-seconds" min="1" max="86400" value="600">
                 </div>
+                <div class="form-group form-row">
+                    <label for="cfg-botcheck-pause" title="When Proxy Mode is Off and YouTube returns a &quot;Sign in to confirm you're not a bot&quot; / rate-limit error, the item is paused for this long, then auto-resumed.">Pause on bot-check when proxies off (seconds)</label>
+                    <input type="number" id="cfg-botcheck-pause" min="1" max="86400" value="600">
+                </div>
                 <div class="form-group">
                     <label for="cfg-proxy-list">Proxy list (optional, one <code>scheme://host:port</code> per line). Leave blank to auto-source a wide pool of public proxies.</label>
                     <textarea id="cfg-proxy-list" rows="3" placeholder="socks5://1.2.3.4:1080&#10;http://5.6.7.8:8080"></textarea>

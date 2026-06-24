@@ -77,6 +77,7 @@
       $('cfg-archive-enabled').checked = String(c.archive_enabled) === 'true';
       $('cfg-proxy-mode').value = c.proxy_mode || 'off';
       $('cfg-proxy-seconds').value = c.proxy_active_seconds || '600';
+      $('cfg-botcheck-pause').value = c.botcheck_pause_seconds || '600';
       $('cfg-proxy-list').value = c.proxy_list || '';
       $('cfg-scheduled-enabled').checked = String(c.scheduled_restart_enabled) === 'true';
       $('cfg-restart-hour').value = c.scheduled_restart_hour || '3';
@@ -102,6 +103,7 @@
       archive_enabled: $('cfg-archive-enabled').checked ? 'true' : 'false',
       proxy_mode: $('cfg-proxy-mode').value,
       proxy_active_seconds: $('cfg-proxy-seconds').value,
+      botcheck_pause_seconds: $('cfg-botcheck-pause').value,
       proxy_list: $('cfg-proxy-list').value.trim(),
       scheduled_restart_enabled: $('cfg-scheduled-enabled').checked ? 'true' : 'false',
       scheduled_restart_hour: $('cfg-restart-hour').value,

@@ -52,6 +52,10 @@ BACKOFF_SCHEDULE = [300, 900, 1800]
 # Short delay used when we just switched to a fresh proxy -- retry quickly
 # rather than waiting out a limit that the new IP isn't subject to.
 PROXY_SWITCH_DELAY = 20
+# Fallback pause (seconds) applied when proxies are OFF and a rate-limit /
+# YouTube bot-check is hit: with no proxy to rotate to we pause the item this
+# long, then auto-resume. Overridden by the 'botcheck_pause_seconds' config.
+DEFAULT_BOTCHECK_PAUSE_SECONDS = 600
 # How many fresh proxies to try before giving up on an item. Free proxies are
 # flaky, so a single bot-check shouldn't fail the item -- we rotate through a
 # good number of them first. Tracked separately from the wait-out retry budget.
@@ -59,11 +63,32 @@ MAX_PROXY_ROTATIONS = 12
 
 
 class ErrorHandler:
-    def __init__(self, db_module, log_callback=None, proxy_manager=None):
+    def __init__(self, db_module, log_callback=None, proxy_manager=None, config=None):
         self.db = db_module
         self.log_callback = log_callback
         self.proxy_manager = proxy_manager
+        self.config = config or {}
         self._retry_timers = {}
+
+    def update_config(self, config):
+        """Apply a freshly-saved config (e.g. a new pause duration)."""
+        if config is not None:
+            self.config = config
+
+    def _proxies_off(self):
+        """True when the proxy system is disabled, so a blocking error cannot be
+        escaped by rotating IPs and the only option is to pause and wait."""
+        pm = self.proxy_manager
+        return pm is None or getattr(pm, 'mode', 'off') == 'off'
+
+    def _botcheck_pause_seconds(self):
+        """User-configured pause length (seconds) for the proxies-off bot-check
+        case, falling back to the default for missing/invalid values."""
+        try:
+            return max(1, int(self.config.get('botcheck_pause_seconds',
+                                              DEFAULT_BOTCHECK_PAUSE_SECONDS)))
+        except (TypeError, ValueError):
+            return DEFAULT_BOTCHECK_PAUSE_SECONDS
 
     def detect_error_type(self, error_msg):
         error_lower = str(error_msg).lower()
@@ -122,6 +147,23 @@ class ErrorHandler:
                       f'{title} -- switched to a fresh proxy; retrying in {PROXY_SWITCH_DELAY}s '
                       f'(proxy rotation {rotations + 1}/{MAX_PROXY_ROTATIONS}){progressed_note}')
             self._schedule_retry(download_id, PROXY_SWITCH_DELAY)
+            return 'rate_limited'
+
+        # Proxies are OFF and this is a rate-limit / YouTube bot-check: there is
+        # no IP to rotate to, so the only way past it is to stop hammering
+        # YouTube and wait. Pause this item for the user-configured number of
+        # seconds, then auto-resume. This is a deliberate, tunable self-throttle,
+        # so -- unlike the bounded wait-out below -- it is NOT capped by the
+        # retry budget: a long archiver should keep pausing and resuming rather
+        # than fail the whole playlist after a few attempts.
+        if error_type == 'rate_limit' and self._proxies_off():
+            delay = self._botcheck_pause_seconds()
+            self.db.update_download(download_id, status='rate_limited',
+                                    error_message=error_msg)
+            self._log(download_id, 'warning',
+                      f'{title} and proxies are off -- pausing this item for {delay}s, '
+                      f'then resuming.')
+            self._schedule_retry(download_id, delay)
             return 'rate_limited'
 
         # No fresh proxy to switch to -- wait out the limit with escalating

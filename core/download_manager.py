@@ -18,7 +18,8 @@ class DownloadManager:
         self.log_callback = log_callback
         self.engine_manager = EngineManager()
         self.proxy_manager = ProxyManager(config=config, log_callback=log_callback)
-        self.error_handler = ErrorHandler(db, log_callback, proxy_manager=self.proxy_manager)
+        self.error_handler = ErrorHandler(db, log_callback,
+                                          proxy_manager=self.proxy_manager, config=config)
         self._workers = {}
         self._workers_lock = threading.Lock()
         self._dispatcher_thread = None
@@ -43,6 +44,7 @@ class DownloadManager:
         """Apply a freshly-saved config to the manager and subsystems."""
         self.config = cfg
         self.proxy_manager.configure(cfg)
+        self.error_handler.update_config(cfg)
 
     def recover_orphans(self):
         """Re-queue items left mid-flight by a previous run/crash.
